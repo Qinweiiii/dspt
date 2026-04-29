@@ -1,0 +1,10 @@
+server: 
+  port: 8081
+
+mysql: 
+  dsn: "root:root1234@tcp(localhost:3306)/hmdp?charset=utf8mb4&parseTime=True&loc=Local" 
+
+redis: 
+  addr: "localhost:6379"
+  password: ""
+  db: 0
