@@ -83,32 +83,6 @@ func LoginRequiredMiddleware() gin.HandlerFunc {
 // 随着各 Phase 推进，逐步移到对应的 handler 文件
 // ========================================
 
-// -- 优惠券模块 --
-type VoucherHandler struct { /* svc *services.VoucherService */
-}
-
-func NewVoucherHandler() *VoucherHandler { return &VoucherHandler{} }
-func (h *VoucherHandler) RegisterRoutes(r *gin.Engine, auth gin.HandlerFunc) {
-	r.GET("/voucher/list/:shopId", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-	protected := r.Group("/voucher")
-	protected.Use(auth)
-	{
-		protected.POST("", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-		protected.POST("/seckill", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-	}
-}
-
-// -- 秒杀下单 --
-type VoucherOrderHandler struct { /* svc *services.VoucherOrderService */
-}
-
-func NewVoucherOrderHandler() *VoucherOrderHandler { return &VoucherOrderHandler{} }
-func (h *VoucherOrderHandler) RegisterRoutes(r *gin.Engine, auth gin.HandlerFunc) {
-	protected := r.Group("/voucher-order")
-	protected.Use(auth)
-	protected.POST("/seckill/:voucherId", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-}
-
 // -- 文件上传 --
 type UploadHandler struct{}
 

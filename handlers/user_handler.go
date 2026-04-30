@@ -54,17 +54,19 @@ func (h *UserHandler) SendCode(c *gin.Context) {
 	// 	return
 	// }
 
-	type SendCodeForm struct {
-		Phone string `json:"phone" binding:"required"`
+	phone := c.Query("phone")
+	if phone == "" {
+		var form struct {
+			Phone string `json:"phone" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&form); err != nil || form.Phone == "" {
+			c.JSON(http.StatusOK, models.Fail("手机号不能为空"))
+			return
+		}
+		phone = form.Phone
 	}
-	var form SendCodeForm
 
-	if err := c.ShouldBindJSON(&form); err != nil {
-		c.JSON(http.StatusOK, models.Fail("手机号不能为空"))
-		return
-	}
-
-	result, err := h.svc.SendCode(c.Request.Context(), form.Phone)
+	result, err := h.svc.SendCode(c.Request.Context(), phone)
 	if err != nil {
 		c.JSON(http.StatusOK, models.Fail("系统异常"))
 		return

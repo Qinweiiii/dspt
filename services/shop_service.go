@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/qinweiiii/dspt/models"
@@ -14,6 +15,9 @@ import (
 const (
 	CacheShopKey = "cache:shop:"
 	CacheTypeKey = "cache:type"
+	ShopGeoKey   = "shop:geo:" // shop:geo:{typeId}
+	maxPageSize  = 5           // 对应 Java SystemConstants.MAX_PAGE_SIZE
+	geoRadius    = 5000.0      // 5km，单位米
 )
 
 type ShopService struct {
@@ -118,4 +122,91 @@ func (s *ShopService) GetTypeList(ctx context.Context) (models.Result, error) {
 	s.rdb.RPush(ctx, CacheTypeKey, jsonStrs...)
 
 	return models.OKData(types), nil
+}
+
+// QueryShopByType 按商铺类型查询，支持 GEO 附近排序
+//
+// x/y 为 nil → 纯 DB 分页（按默认排序）
+// x/y 有值  → Redis GEO 按距离排序 + 分页，并回填距离字段
+//
+// 对应 Java: ShopServiceImpl.queryShopByType()
+func (s *ShopService) QueryShopByType(ctx context.Context, typeID, current int, x, y *float64) (models.Result, error) {
+	offset := (current - 1) * maxPageSize
+
+	// ── 无坐标：普通分页 ──────────────────────────────────────────
+	if x == nil || y == nil {
+		shops, err := s.repo.FindByTypeID(ctx, typeID, offset, maxPageSize)
+		if err != nil {
+			return models.Fail("系统异常"), err
+		}
+		return models.OKData(shops), nil
+	}
+
+	// ── 有坐标：GEO 距离排序 ──────────────────────────────────────
+	// Redis GEOSEARCH 不直接支持 offset，需取 [0, end) 再手动截取
+	// 对应 Java: opsForGeo().search(...).limit(end)
+	end := current * maxPageSize
+	key := ShopGeoKey + strconv.Itoa(typeID)
+
+	results, err := s.rdb.GeoSearchLocation(ctx, key, &redis.GeoSearchLocationQuery{
+		GeoSearchQuery: redis.GeoSearchQuery{
+			Longitude:  *x,
+			Latitude:   *y,
+			Radius:     geoRadius,
+			RadiusUnit: "m",
+			Sort:       "ASC",
+			Count:      end, // 取到当前页末尾，再手动 skip from
+		},
+		WithDist: true,
+	}).Result()
+	if err != nil {
+		return models.Fail("系统异常"), fmt.Errorf("GeoSearchLocation: %w", err)
+	}
+	if len(results) == 0 {
+		return models.OKData([]*models.Shop{}), nil
+	}
+
+	// 没有下一页
+	if int64(len(results)) <= int64(offset) {
+		return models.OKData([]*models.Shop{}), nil
+	}
+
+	// 截取当前页，收集 id 和距离
+	// 对应 Java: content.stream().skip(from).forEach(...)
+	page := results[offset:]
+	ids := make([]int64, 0, len(page))
+	distMap := make(map[int64]float64, len(page))
+
+	for _, r := range page {
+		id, err := strconv.ParseInt(r.Name, 10, 64)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, id)
+		distMap[id] = r.Dist // 单位：米
+	}
+
+	// 按 GEO 返回的顺序查 DB（FIELD 保序）
+	shops, err := s.repo.FindByIDsOrdered(ctx, ids)
+	if err != nil {
+		return models.Fail("系统异常"), err
+	}
+
+	// 回填距离字段
+	for _, shop := range shops {
+		shop.Distance = distMap[shop.ID]
+	}
+
+	return models.OKData(shops), nil
+}
+
+// QueryShopByName 按名称关键字模糊查询分页
+// 对应 Java: ShopController.queryShopByName()
+func (s *ShopService) QueryShopByName(ctx context.Context, name string, current int) (models.Result, error) {
+	offset := (current - 1) * maxPageSize
+	shops, err := s.repo.FindByName(ctx, name, offset, maxPageSize)
+	if err != nil {
+		return models.Fail("系统异常"), err
+	}
+	return models.OKData(shops), nil
 }

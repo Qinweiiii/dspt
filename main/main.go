@@ -18,8 +18,10 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/qinweiiii/dspt/handlers"
+	"github.com/qinweiiii/dspt/mq"
 	"github.com/qinweiiii/dspt/repositories"
 	"github.com/qinweiiii/dspt/services"
+	"github.com/qinweiiii/dspt/utils"
 )
 
 // ========================================
@@ -83,19 +85,35 @@ func main() {
 	followSvc := services.NewFollowService(followRepo, userRepo, rdb)
 	followHandler := handlers.NewFollowHandler(followSvc)
 
-	voucherHandler := handlers.NewVoucherHandler()
-	voucherOrderHandler := handlers.NewVoucherOrderHandler()
+	// 共享基础设施
+	idWorker := utils.NewIDWorker(rdb)
+	locker := utils.NewRedisLocker(rdb)
+
+	// 秒杀模块
+	voucherRepo := repositories.NewVoucherRepository(db)
+	voucherSvc := services.NewVoucherService(voucherRepo, rdb, idWorker, locker)
+	voucherHandler := handlers.NewVoucherHandler(voucherSvc)
+	voucherOrderHandler := handlers.NewVoucherOrderHandler(voucherSvc)
+
 	uploadHandler := handlers.NewUploadHandler()
 
+	geoLoader := utils.NewShopGeoLoader(rdb)
+	if err := geoLoader.Load(context.Background(), shopRepo); err != nil {
+		log.Printf("⚠️  GEO 数据导入失败（不影响启动）: %v", err)
+	}
+
 	// 5. 创建 Gin 路由
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	r := setupRouter(rdb, userHandler, shopHandler,
 		blogHandler, followHandler, voucherHandler, voucherOrderHandler, uploadHandler)
 
 	// 6. 启动秒杀订单异步消费者（Phase 5 实现后取消注释）
-	// go mq.StartVoucherOrderConsumer(rdb, db)
+	consumer := mq.NewVoucherOrderConsumer(rdb, voucherSvc, locker)
+	go consumer.Start(ctx) // ctx 取消时消费者自动退出
 
 	// 7. 启动 HTTP 服务器（支持优雅关机）
-	startServer(r, cfg.Server.Port)
+	startServerWithCtx(r, cfg.Server.Port, cancel)
 }
 
 // ========================================
@@ -209,31 +227,25 @@ func initStreamGroup(client *redis.Client) {
 	log.Println("✅ Redis Stream 消费组 g1 创建成功")
 }
 
-func startServer(r *gin.Engine, port int) {
-	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: r,
-	}
+func startServerWithCtx(r *gin.Engine, port int, cancel context.CancelFunc) {
+	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: r}
 	go func() {
-		log.Printf("🚀 服务启动成功，监听端口: %d", port)
+		log.Printf("🚀 服务启动，端口: %d", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("服务器启动失败: %v", err)
+			log.Fatalf("启动失败: %v", err)
 		}
 	}()
 
 	quit := make(chan os.Signal, 1)
-	// 把系统关闭信号转发到 quit 这个通道里
-	// 监听两种信号：SIGINT = Ctrl + C | SIGTERM = 程序被正常关闭
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit // 程序停在这里不动，等你按 Ctrl+C 或关闭程序
-	log.Println("⏳ 正在优雅关闭服务器...")
+	<-quit
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("服务器强制关闭: %v", err)
-	}
-	log.Println("✅ 服务器已安全退出")
+	cancel() // 先通知所有 goroutine 退出
+
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutCancel()
+	srv.Shutdown(shutCtx)
+	log.Println("✅ 服务已安全退出")
 }
 
 func maskDSN(dsn string) string {
