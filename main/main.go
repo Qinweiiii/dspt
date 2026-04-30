@@ -70,19 +70,25 @@ func main() {
 	// 商铺模块
 	shopRepo := repositories.NewShopRepository(db)
 	shopSvc := services.NewShopService(shopRepo, rdb)
-	shopTypeSvc := services.NewShopTypeService(shopRepo, rdb)
 	shopHandler := handlers.NewShopHandler(shopSvc)
-	shopTypeHandler := handlers.NewShopTypeHandler(shopTypeSvc)
 
-	// 其他模块（Phase 4+ 实现后在此注入）
-	blogHandler := handlers.NewBlogHandler()
-	followHandler := handlers.NewFollowHandler()
+	// 博客模块
+	// followRepo 同时被 blogSvc （推 Feed）和 followSvc 使用，共享同一个实例
+	blogRepo := repositories.NewBlogRepository(db)
+	followRepo := repositories.NewFollowRepository(db)
+	blogSvc := services.NewBlogService(blogRepo, userRepo, followRepo, rdb)
+	blogHandler := handlers.NewBlogHandler(blogSvc)
+
+	// 关注模块
+	followSvc := services.NewFollowService(followRepo, userRepo, rdb)
+	followHandler := handlers.NewFollowHandler(followSvc)
+
 	voucherHandler := handlers.NewVoucherHandler()
 	voucherOrderHandler := handlers.NewVoucherOrderHandler()
 	uploadHandler := handlers.NewUploadHandler()
 
 	// 5. 创建 Gin 路由
-	r := setupRouter(rdb, userHandler, shopHandler, shopTypeHandler,
+	r := setupRouter(rdb, userHandler, shopHandler,
 		blogHandler, followHandler, voucherHandler, voucherOrderHandler, uploadHandler)
 
 	// 6. 启动秒杀订单异步消费者（Phase 5 实现后取消注释）
@@ -100,7 +106,6 @@ func setupRouter(
 	rdb *redis.Client,
 	userH *handlers.UserHandler,
 	shopH *handlers.ShopHandler,
-	shopTypeH *handlers.ShopTypeHandler,
 	blogH *handlers.BlogHandler,
 	followH *handlers.FollowHandler,
 	voucherH *handlers.VoucherHandler,
@@ -124,7 +129,6 @@ func setupRouter(
 	// 各模块路由注册
 	userH.RegisterRoutes(r, authRequired)
 	shopH.RegisterRoutes(r, authRequired)
-	shopTypeH.RegisterRoutes(r)
 	blogH.RegisterRoutes(r, authRequired)
 	followH.RegisterRoutes(r, authRequired)
 	voucherH.RegisterRoutes(r, authRequired)

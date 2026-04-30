@@ -99,3 +99,23 @@ func (r *UserRepository) FindInfoByUserID(ctx context.Context, userID int64) (*m
 	}
 	return info, nil
 }
+
+// IncrFans 粉丝数 +1 / -1
+func (r *UserRepository) UpdateFans(ctx context.Context, userID int64, delta int) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO tb_user_info (user_id, fans) VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE fans = fans + ?`,
+		userID, delta, delta,
+	)
+	return err
+}
+
+// UpdateFollowee 关注数 +1 / -1
+func (r *UserRepository) UpdateFollowee(ctx context.Context, userID int64, delta int) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO tb_user_info (user_id, followee) VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE followee = followee + ?`,
+		userID, delta, delta,
+	)
+	return err
+}

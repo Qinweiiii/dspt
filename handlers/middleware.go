@@ -83,45 +83,6 @@ func LoginRequiredMiddleware() gin.HandlerFunc {
 // 随着各 Phase 推进，逐步移到对应的 handler 文件
 // ========================================
 
-// 商铺模块已被移至 shop_handler.go
-
-// -- 博客模块 --
-type BlogHandler struct { /* svc *services.BlogService */
-}
-
-func NewBlogHandler() *BlogHandler { return &BlogHandler{} }
-func (h *BlogHandler) RegisterRoutes(r *gin.Engine, auth gin.HandlerFunc) {
-	public := r.Group("/blog")
-	public.GET("/hot", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-
-	protected := r.Group("/blog")
-	protected.Use(auth)
-	{
-		protected.GET("/:id", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-		protected.POST("", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-		protected.PUT("/like/:id", func(c *gin.Context) { c.JSON(200, gin.H{"success": true}) })
-		protected.GET("/likes/:id", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-		protected.GET("/of/me", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-		protected.GET("/of/user", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-		protected.GET("/of/follow", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-	}
-}
-
-// -- 关注模块 --
-type FollowHandler struct { /* svc *services.FollowService */
-}
-
-func NewFollowHandler() *FollowHandler { return &FollowHandler{} }
-func (h *FollowHandler) RegisterRoutes(r *gin.Engine, auth gin.HandlerFunc) {
-	protected := r.Group("/follow")
-	protected.Use(auth)
-	{
-		protected.PUT("/:id/:isFollow", func(c *gin.Context) { c.JSON(200, gin.H{"success": true}) })
-		protected.GET("/or/not/:id", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": false}) })
-		protected.GET("/common/:id", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-	}
-}
-
 // -- 优惠券模块 --
 type VoucherHandler struct { /* svc *services.VoucherService */
 }
