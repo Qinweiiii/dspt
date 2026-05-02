@@ -91,6 +91,26 @@ func (r *VoucherRepository) SaveSeckillVoucher(ctx context.Context, sv *models.S
 	return nil
 }
 
+// FindSeckillStocks 查询所有秒杀券库存
+func (r *VoucherRepository) FindSeckillStocks(ctx context.Context) (map[int64]int, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT voucher_id, stock FROM tb_seckill_voucher WHERE stock > 0`)
+	if err != nil {
+		return nil, fmt.Errorf("FindSeckillStocks: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int64]int)
+	for rows.Next() {
+		var voucherID int64
+		var stock int
+		if err := rows.Scan(&voucherID, &stock); err != nil {
+			return nil, fmt.Errorf("FindSeckillStocks scan: %w", err)
+		}
+		result[voucherID] = stock
+	}
+	return result, rows.Err()
+}
+
 // ----------------------------------------
 // tb_voucher_order — 事务操作
 //

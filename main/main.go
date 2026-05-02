@@ -109,6 +109,11 @@ func main() {
 		log.Printf("⚠️  GEO 数据导入失败（不影响启动）: %v", err)
 	}
 
+	stockLoader := utils.NewSeckillStockLoader(rdb)
+	if err := stockLoader.Load(context.Background(), voucherRepo); err != nil {
+		log.Printf("⚠️  秒杀库存同步失败（不影响启动）: %v", err)
+	}
+
 	// 5. 创建 Gin 路由
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

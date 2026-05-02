@@ -17,8 +17,9 @@ local stockKey = 'seckill:stock:' .. voucherId
 local orderKey = 'seckill:order:' .. voucherId
 
 --库存是否充足
---库存不足
-if (tonumber(redis.call('get', stockKey)) <= 0) then
+--库存不足或未初始化
+local stock = tonumber(redis.call('get', stockKey))
+if (not stock) or (stock <= 0) then
     return 1
 end
 
