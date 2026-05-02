@@ -48,7 +48,6 @@ func (r *BlogRepository) FindByID(ctx context.Context, id int64) (*models.Blog, 
 }
 
 // FindHotPage 热门博客分页（按 liked 降序）
-// 对应 Java: blogService.query().orderByDesc("liked").page(...)
 func (r *BlogRepository) FindHotPage(ctx context.Context, offset, size int) ([]*models.Blog, error) {
 	query := fmt.Sprintf(`SELECT %s FROM tb_blog ORDER BY liked DESC LIMIT ? OFFSET ?`, blogColumns)
 	rows, err := r.db.QueryContext(ctx, query, size, offset)
@@ -71,7 +70,6 @@ func (r *BlogRepository) FindByUserID(ctx context.Context, userID int64, offset,
 }
 
 // FindByIDsOrdered 根据有序 id 列表查 Blog，并保持传入的顺序
-// 对应 Java: listByIds(ids) + 手动排序
 func (r *BlogRepository) FindByIDsOrdered(ctx context.Context, ids []int64) ([]*models.Blog, error) {
 	if len(ids) == 0 {
 		return nil, nil

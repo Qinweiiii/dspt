@@ -84,12 +84,22 @@ func (r *UserRepository) Create(ctx context.Context, user *models.User) (int64, 
 // FindInfoByUserID 根据 userId 查用户详情
 func (r *UserRepository) FindInfoByUserID(ctx context.Context, userID int64) (*models.UserInfo, error) {
 	info := &models.UserInfo{}
+	var (
+		city      sql.NullString
+		introduce sql.NullString
+		fans      sql.NullInt64
+		followee  sql.NullInt64
+		gender    sql.NullBool
+		birthday  sql.NullString
+		credits   sql.NullInt64
+		level     sql.NullInt64
+	)
 	query := `SELECT user_id, city, introduce, fans, followee, gender, birthday, credits, level
 	          FROM tb_user_info WHERE user_id = ? LIMIT 1`
 	err := r.db.QueryRowContext(ctx, query, userID).Scan(
-		&info.UserID, &info.City, &info.Introduce,
-		&info.Fans, &info.Followee, &info.Gender,
-		&info.Birthday, &info.Credits, &info.Level,
+		&info.UserID, &city, &introduce,
+		&fans, &followee, &gender,
+		&birthday, &credits, &level,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -97,14 +107,38 @@ func (r *UserRepository) FindInfoByUserID(ctx context.Context, userID int64) (*m
 	if err != nil {
 		return nil, fmt.Errorf("FindInfoByUserID: %w", err)
 	}
+	if city.Valid {
+		info.City = city.String
+	}
+	if introduce.Valid {
+		info.Introduce = introduce.String
+	}
+	if fans.Valid {
+		info.Fans = int(fans.Int64)
+	}
+	if followee.Valid {
+		info.Followee = int(followee.Int64)
+	}
+	if gender.Valid {
+		info.Gender = gender.Bool
+	}
+	if birthday.Valid {
+		info.Birthday = birthday.String
+	}
+	if credits.Valid {
+		info.Credits = int(credits.Int64)
+	}
+	if level.Valid {
+		info.Level = int(level.Int64)
+	}
 	return info, nil
 }
 
 // IncrFans 粉丝数 +1 / -1
 func (r *UserRepository) UpdateFans(ctx context.Context, userID int64, delta int) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO tb_user_info (user_id, fans) VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE fans = fans + ?`,
+		`INSERT INTO tb_user_info (user_id, fans) VALUES (?, GREATEST(?, 0))
+         ON DUPLICATE KEY UPDATE fans = GREATEST(CAST(fans AS SIGNED) + ?, 0)`,
 		userID, delta, delta,
 	)
 	return err
@@ -113,8 +147,8 @@ func (r *UserRepository) UpdateFans(ctx context.Context, userID int64, delta int
 // UpdateFollowee 关注数 +1 / -1
 func (r *UserRepository) UpdateFollowee(ctx context.Context, userID int64, delta int) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO tb_user_info (user_id, followee) VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE followee = followee + ?`,
+		`INSERT INTO tb_user_info (user_id, followee) VALUES (?, GREATEST(?, 0))
+         ON DUPLICATE KEY UPDATE followee = GREATEST(CAST(followee AS SIGNED) + ?, 0)`,
 		userID, delta, delta,
 	)
 	return err

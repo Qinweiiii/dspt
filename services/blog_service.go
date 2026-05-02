@@ -17,12 +17,11 @@ import (
 const (
 	BlogLikedKey = "blog:liked:" // ZSet  → blog:liked:{blogId}   member=userId  score=时间戳
 	FeedKey      = "feed:"       // ZSet  → feed:{userId}          member=blogId  score=时间戳
-	MaxPageSize  = 5             // 对应 Java SystemConstants.MAX_PAGE_SIZE
+	MaxPageSize  = 10
 )
 
 // ========================================
 // BlogService
-// 对应 Java IBlogService / BlogServiceImpl
 // ========================================
 
 type BlogService struct {
@@ -48,7 +47,6 @@ func NewBlogService(
 
 // ----------------------------------------
 // QueryHotBlog 热门博客分页（按 liked 降序）
-// 对应 Java: IBlogService.queryHotBlog()
 // ----------------------------------------
 func (s *BlogService) QueryHotBlog(ctx context.Context, current int, loginUserID int64) (models.Result, error) {
 	offset := (current - 1) * MaxPageSize
@@ -68,7 +66,6 @@ func (s *BlogService) QueryHotBlog(ctx context.Context, current int, loginUserID
 
 // ----------------------------------------
 // QueryBlogByID 根据 id 查博客详情
-// 对应 Java: IBlogService.queryBlogById()
 // ----------------------------------------
 func (s *BlogService) QueryBlogByID(ctx context.Context, id int64, loginUserID int64) (models.Result, error) {
 	blog, err := s.blogRepo.FindByID(ctx, id)
@@ -89,7 +86,6 @@ func (s *BlogService) QueryBlogByID(ctx context.Context, id int64, loginUserID i
 
 // ----------------------------------------
 // LikeBlog 点赞 / 取消点赞
-// 对应 Java: IBlogService.likeBlog()
 // 用 ZSet 实现，score = 时间戳，方便后续按点赞时间排序
 // ----------------------------------------
 func (s *BlogService) LikeBlog(ctx context.Context, blogID int64, loginUserID int64) (models.Result, error) {
@@ -122,7 +118,6 @@ func (s *BlogService) LikeBlog(ctx context.Context, blogID int64, loginUserID in
 
 // ----------------------------------------
 // QueryBlogLikesByID 点赞排行榜（最早点赞的 Top5）
-// 对应 Java: IBlogService.queryBlogLikesById()
 // ZRANGE key 0 4 → 取 score 最小（最早点赞）的 5 人
 // ----------------------------------------
 func (s *BlogService) QueryBlogLikesByID(ctx context.Context, blogID int64) (models.Result, error) {
@@ -141,7 +136,7 @@ func (s *BlogService) QueryBlogLikesByID(ctx context.Context, blogID int64) (mod
 		ids = append(ids, id)
 	}
 
-	// 批量查用户，并保持顺序（对应 Java listByIds + stream map）
+	// 批量查用户，并保持顺序
 	dtos := make([]models.UserDTO, 0, len(ids))
 	for _, id := range ids {
 		user, err := s.userRepo.FindByID(ctx, id)
@@ -160,7 +155,6 @@ func (s *BlogService) QueryBlogLikesByID(ctx context.Context, blogID int64) (mod
 
 // ----------------------------------------
 // SaveBlog 发布博客，并推送到粉丝的 Feed ZSet
-// 对应 Java: IBlogService.saveBlog()
 // ----------------------------------------
 func (s *BlogService) SaveBlog(ctx context.Context, blog *models.Blog, loginUserID int64) (models.Result, error) {
 	blog.UserID = loginUserID
@@ -172,7 +166,6 @@ func (s *BlogService) SaveBlog(ctx context.Context, blog *models.Blog, loginUser
 	blog.ID = id
 
 	// 查询所有粉丝（关注了当前用户的人）
-	// 对应 Java: followService.query().eq("follow_user_id", user.getId())
 	fans, err := s.followRepo.FindFanUserIDs(ctx, loginUserID)
 	if err != nil {
 		// 推 Feed 失败不影响发布成功，记录错误即可
@@ -194,7 +187,6 @@ func (s *BlogService) SaveBlog(ctx context.Context, blog *models.Blog, loginUser
 
 // ----------------------------------------
 // QueryBlogOfFollow Feed 流滚动分页
-// 对应 Java: IBlogService.queryBlogOfFollow()
 // ----------------------------------------
 func (s *BlogService) QueryBlogOfFollow(ctx context.Context, loginUserID int64, max int64, offset int) (models.Result, error) {
 	key := FeedKey + strconv.FormatInt(loginUserID, 10)
@@ -253,7 +245,6 @@ func (s *BlogService) QueryBlogOfFollow(ctx context.Context, loginUserID int64, 
 
 // ----------------------------------------
 // QueryMyBlog 查询当前用户的博客（分页）
-// 对应 Java: BlogController.queryMyBlog()
 // ----------------------------------------
 func (s *BlogService) QueryMyBlog(ctx context.Context, userID int64, current int) (models.Result, error) {
 	offset := (current - 1) * MaxPageSize
@@ -266,7 +257,6 @@ func (s *BlogService) QueryMyBlog(ctx context.Context, userID int64, current int
 
 // ----------------------------------------
 // QueryBlogByUserID 查询指定用户的博客（分页）
-// 对应 Java: BlogController.queryBlogByUserId()
 // ----------------------------------------
 func (s *BlogService) QueryBlogByUserID(ctx context.Context, userID int64, current int) (models.Result, error) {
 	offset := (current - 1) * MaxPageSize
@@ -282,7 +272,6 @@ func (s *BlogService) QueryBlogByUserID(ctx context.Context, userID int64, curre
 // ========================================
 
 // fillBlogUser 用博客的 userId 查用户，填充 icon / name 字段
-// 对应 Java: queryBlogUser()
 func (s *BlogService) fillBlogUser(ctx context.Context, blog *models.Blog) error {
 	user, err := s.userRepo.FindByID(ctx, blog.UserID)
 	if err != nil {
@@ -296,7 +285,6 @@ func (s *BlogService) fillBlogUser(ctx context.Context, blog *models.Blog) error
 }
 
 // fillIsLike 查询当前登录用户是否对该博客点过赞
-// 对应 Java: isBlogLiked()
 func (s *BlogService) fillIsLike(ctx context.Context, blog *models.Blog, loginUserID int64) {
 	if loginUserID == 0 {
 		return

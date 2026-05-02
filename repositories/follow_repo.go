@@ -73,7 +73,6 @@ func (r *FollowRepository) FindFollowUserIDs(ctx context.Context, userID int64) 
 }
 
 // FindFanUserIDs 查询关注了 followUserID 的所有粉丝 user_id
-// 对应 Java: followService.query().eq("follow_user_id", userId)
 // 供 BlogService.SaveBlog 推 Feed 流使用
 func (r *FollowRepository) FindFanUserIDs(ctx context.Context, followUserID int64) ([]int64, error) {
 	rows, err := r.db.QueryContext(ctx,
@@ -97,7 +96,6 @@ func (r *FollowRepository) FindFanUserIDs(ctx context.Context, followUserID int6
 }
 
 // FindCommonFollowUserIDs 查询两个用户共同关注的 follow_user_id
-// 对应 Java: followCommons 里 Redis SINTER 后查 DB
 // 直接用 INNER JOIN 等价实现
 func (r *FollowRepository) FindCommonFollowUserIDs(ctx context.Context, userID1, userID2 int64) ([]int64, error) {
 	rows, err := r.db.QueryContext(ctx, `

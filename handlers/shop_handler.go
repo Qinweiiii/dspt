@@ -20,6 +20,7 @@ func NewShopHandler(svc *services.ShopService) *ShopHandler {
 func (h *ShopHandler) RegisterRoutes(r *gin.Engine, auth gin.HandlerFunc) {
 	public := r.Group("/shop")
 	{
+		public.POST("", h.SaveShop)
 		public.GET("/of/type", h.QueryShopByType) // 按类型查店铺
 		public.GET("/of/name", h.QueryShopByName) // 按名称查店铺
 
@@ -58,6 +59,21 @@ func (h *ShopHandler) UpdateShop(c *gin.Context) {
 	}
 
 	result, err := h.svc.Update(c.Request.Context(), &shop)
+	if err != nil {
+		c.JSON(http.StatusOK, models.Fail("系统异常"))
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *ShopHandler) SaveShop(c *gin.Context) {
+	var shop models.Shop
+	if err := c.ShouldBindJSON(&shop); err != nil {
+		c.JSON(http.StatusOK, models.Fail("参数格式错误"))
+		return
+	}
+
+	result, err := h.svc.Save(c.Request.Context(), &shop)
 	if err != nil {
 		c.JSON(http.StatusOK, models.Fail("系统异常"))
 		return

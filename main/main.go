@@ -42,11 +42,18 @@ type Config struct {
 		Password string `yaml:"password"`
 		DB       int    `yaml:"db"`
 	} `yaml:"redis"`
+
+	Upload struct {
+		Dir string `yaml:"dir"`
+	} `yaml:"upload"`
 }
 
 func main() {
 	// 1. 加载配置
 	cfg := loadConfig("config.yaml")
+	if cfg.Upload.Dir == "" {
+		cfg.Upload.Dir = "resources/uploads"
+	}
 
 	// 2. 初始化 MySQL
 	db := initMySQL(cfg)
@@ -95,7 +102,7 @@ func main() {
 	voucherHandler := handlers.NewVoucherHandler(voucherSvc)
 	voucherOrderHandler := handlers.NewVoucherOrderHandler(voucherSvc)
 
-	uploadHandler := handlers.NewUploadHandler()
+	uploadHandler := handlers.NewUploadHandler(cfg.Upload.Dir)
 
 	geoLoader := utils.NewShopGeoLoader(rdb)
 	if err := geoLoader.Load(context.Background(), shopRepo); err != nil {

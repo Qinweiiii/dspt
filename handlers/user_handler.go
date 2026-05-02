@@ -47,13 +47,6 @@ func (h *UserHandler) RegisterRoutes(r *gin.Engine, authRequired gin.HandlerFunc
 // SendCode POST /user/code?phone=xxx
 // ----------------------------------------
 func (h *UserHandler) SendCode(c *gin.Context) {
-	// @RequestParam("phone") → c.Query("phone")
-	// phone := c.Query("phone")
-	// if phone == "" {
-	// 	c.JSON(http.StatusOK, models.Fail("手机号不能为空"))
-	// 	return
-	// }
-
 	phone := c.Query("phone")
 	if phone == "" {
 		var form struct {

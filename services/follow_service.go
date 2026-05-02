@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 
 	"github.com/qinweiiii/dspt/models"
@@ -43,6 +44,7 @@ func NewFollowService(
 // 对应 Java: IFollowService.follow()
 // ----------------------------------------
 func (s *FollowService) Follow(ctx context.Context, loginUserID int64, followUserID int64, isFollow bool) (models.Result, error) {
+	log.Printf("[Follow] user=%d target=%d isFollow=%t", loginUserID, followUserID, isFollow)
 	if isFollow {
 		// 关注：DB 插入 + Redis Set 写入
 		if err := s.followRepo.Insert(ctx, loginUserID, followUserID); err != nil {
@@ -51,8 +53,12 @@ func (s *FollowService) Follow(ctx context.Context, loginUserID int64, followUse
 		// SADD follow:{loginUserId} {followUserId}
 		key := FollowKey + strconv.FormatInt(loginUserID, 10)
 		s.rdb.SAdd(ctx, key, strconv.FormatInt(followUserID, 10))
-		s.userRepo.UpdateFollowee(ctx, loginUserID, +1) // 我的关注数+1
-		s.userRepo.UpdateFans(ctx, followUserID, +1)    // 对方粉丝数+1
+		if err := s.userRepo.UpdateFollowee(ctx, loginUserID, +1); err != nil {
+			return models.Fail("系统异常"), err
+		}
+		if err := s.userRepo.UpdateFans(ctx, followUserID, +1); err != nil {
+			return models.Fail("系统异常"), err
+		}
 	} else {
 		// 取关：DB 删除 + Redis Set 移除
 		if err := s.followRepo.Delete(ctx, loginUserID, followUserID); err != nil {
@@ -60,8 +66,12 @@ func (s *FollowService) Follow(ctx context.Context, loginUserID int64, followUse
 		}
 		key := FollowKey + strconv.FormatInt(loginUserID, 10)
 		s.rdb.SRem(ctx, key, strconv.FormatInt(followUserID, 10))
-		s.userRepo.UpdateFollowee(ctx, loginUserID, -1)
-		s.userRepo.UpdateFans(ctx, followUserID, -1)
+		if err := s.userRepo.UpdateFollowee(ctx, loginUserID, -1); err != nil {
+			return models.Fail("系统异常"), err
+		}
+		if err := s.userRepo.UpdateFans(ctx, followUserID, -1); err != nil {
+			return models.Fail("系统异常"), err
+		}
 	}
 	return models.OK(), nil
 }

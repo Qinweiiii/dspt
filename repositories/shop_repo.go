@@ -37,6 +37,19 @@ func (r *ShopRepository) Update(ctx context.Context, shop *models.Shop) error {
 	return err
 }
 
+func (r *ShopRepository) Save(ctx context.Context, shop *models.Shop) (int64, error) {
+	query := `INSERT INTO tb_shop (name, type_id, images, area, address, x, y, avg_price, open_hours)
+	         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	res, err := r.db.ExecContext(ctx, query,
+		shop.Name, shop.TypeID, shop.Images, shop.Area, shop.Address,
+		shop.X, shop.Y, shop.AvgPrice, shop.OpenHours,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("Save shop: %w", err)
+	}
+	return res.LastInsertId()
+}
+
 func (r *ShopRepository) FindAllShopTypes(ctx context.Context) ([]models.ShopType, error) {
 	query := `SELECT id, name, icon, sort FROM tb_shop_type ORDER BY sort ASC`
 	rows, err := r.db.QueryContext(ctx, query)

@@ -2,11 +2,17 @@ package handlers
 
 import (
 	"context"
+	"fmt"
+	"hash/fnv"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/qinweiiii/dspt/models"
 	"github.com/qinweiiii/dspt/services"
 	"github.com/redis/go-redis/v9"
@@ -78,21 +84,93 @@ func LoginRequiredMiddleware() gin.HandlerFunc {
 	}
 }
 
-// ========================================
-// 以下是其他模块的 handler 占位符
-// 随着各 Phase 推进，逐步移到对应的 handler 文件
-// ========================================
-
 // -- 文件上传 --
-type UploadHandler struct{}
+type UploadHandler struct {
+	baseDir string
+}
 
-func NewUploadHandler() *UploadHandler { return &UploadHandler{} }
+func NewUploadHandler(baseDir string) *UploadHandler {
+	return &UploadHandler{baseDir: baseDir}
+}
+
 func (h *UploadHandler) RegisterRoutes(r *gin.Engine) {
 	upload := r.Group("/upload")
 	{
-		upload.POST("", func(c *gin.Context) { c.JSON(200, gin.H{"success": true, "data": "TODO"}) })
-		upload.DELETE("", func(c *gin.Context) { c.JSON(200, gin.H{"success": true}) })
+		upload.POST("/blog", h.UploadBlogImage)
+		upload.GET("/blog/delete", h.DeleteBlogImage)
+		upload.POST("", h.UploadBlogImage)
+		upload.DELETE("", h.DeleteBlogImage)
 	}
+}
+
+func (h *UploadHandler) UploadBlogImage(c *gin.Context) {
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusOK, models.Fail("文件不能为空"))
+		return
+	}
+
+	fileName := h.createNewFileName(file.Filename)
+	savePath := filepath.Join(h.baseDir, filepath.FromSlash(strings.TrimLeft(fileName, "/")))
+	if err := os.MkdirAll(filepath.Dir(savePath), 0o755); err != nil {
+		c.JSON(http.StatusOK, models.Fail("创建目录失败"))
+		return
+	}
+	if err := c.SaveUploadedFile(file, savePath); err != nil {
+		c.JSON(http.StatusOK, models.Fail("文件上传失败"))
+		return
+	}
+
+	c.JSON(http.StatusOK, models.OKData(fileName))
+}
+
+func (h *UploadHandler) DeleteBlogImage(c *gin.Context) {
+	name := c.Query("name")
+	if name == "" {
+		c.JSON(http.StatusOK, models.Fail("文件名不能为空"))
+		return
+	}
+	if strings.Contains(name, "..") {
+		c.JSON(http.StatusOK, models.Fail("错误的文件名称"))
+		return
+	}
+
+	rel := filepath.FromSlash(strings.TrimLeft(name, "/"))
+	path := filepath.Join(h.baseDir, rel)
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusOK, models.OK())
+			return
+		}
+		c.JSON(http.StatusOK, models.Fail("删除失败"))
+		return
+	}
+	if info.IsDir() {
+		c.JSON(http.StatusOK, models.Fail("错误的文件名称"))
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		c.JSON(http.StatusOK, models.Fail("删除失败"))
+		return
+	}
+
+	c.JSON(http.StatusOK, models.OK())
+}
+
+func (h *UploadHandler) createNewFileName(original string) string {
+	ext := filepath.Ext(original)
+	name := uuid.New().String()
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(name))
+	hash := hasher.Sum32()
+	d1 := hash & 0xF
+	d2 := (hash >> 4) & 0xF
+
+	if ext == "" {
+		return fmt.Sprintf("/blogs/%x/%x/%s", d1, d2, name)
+	}
+	return fmt.Sprintf("/blogs/%x/%x/%s%s", d1, d2, name, ext)
 }
 
 // GetCurrentUser 从 Gin Context 中安全获取当前用户（供其他 handler 文件调用）

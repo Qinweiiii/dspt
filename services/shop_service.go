@@ -16,8 +16,15 @@ const (
 	CacheShopKey = "cache:shop:"
 	CacheTypeKey = "cache:type"
 	ShopGeoKey   = "shop:geo:" // shop:geo:{typeId}
-	maxPageSize  = 5           // 对应 Java SystemConstants.MAX_PAGE_SIZE
-	geoRadius    = 5000.0      // 5km，单位米
+	LockShopKey  = "lock:shop:"
+
+	CacheShopTTL        = 30 * time.Minute
+	CacheNullTTL        = 2 * time.Minute
+	CacheShopLogicalTTL = 30 * time.Minute
+	LockShopTTL         = 10 * time.Second
+
+	maxPageSize = 10        // 对应 Java SystemConstants.MAX_PAGE_SIZE
+	geoRadius   = 2000000.0 // 2000km，单位米
 )
 
 type ShopService struct {
@@ -36,36 +43,41 @@ func NewShopService(repo *repositories.ShopRepository, rdb *redis.Client) *ShopS
 func (s *ShopService) QueryByID(ctx context.Context, id int64) (models.Result, error) {
 	key := fmt.Sprintf("%s%d", CacheShopKey, id)
 
-	// 1. 查 Redis
 	cacheData, err := s.rdb.Get(ctx, key).Result()
-	if err == nil {
-		if cacheData == "" { // 缓存空值（防穿透）
-			return models.Fail("商铺不存在"), nil
-		}
-		var shop models.Shop
-		json.Unmarshal([]byte(cacheData), &shop)
-		return models.OKData(shop), nil
-	} else if err != redis.Nil {
+	if err != nil && err != redis.Nil {
 		return models.Fail("系统异常"), err
 	}
-
-	// 2. Redis 未命中，查 DB
-	shop, err := s.repo.FindByID(ctx, id)
-	if err != nil {
-		return models.Fail("系统异常"), err
+	if err == redis.Nil {
+		return s.queryShopFromDB(ctx, key, id)
 	}
-
-	// 3. DB 不存在，缓存空值（防穿透）
-	if shop == nil {
-		s.rdb.Set(ctx, key, "", 2*time.Minute)
+	if cacheData == "" {
 		return models.Fail("商铺不存在"), nil
 	}
 
-	// 4. DB 存在，写入缓存
-	shopBytes, _ := json.Marshal(shop)
-	s.rdb.Set(ctx, key, string(shopBytes), 30*time.Minute)
+	var redisData models.RedisData
+	if err := json.Unmarshal([]byte(cacheData), &redisData); err != nil {
+		var shop models.Shop
+		if err := json.Unmarshal([]byte(cacheData), &shop); err != nil {
+			return models.Fail("系统异常"), err
+		}
+		return models.OKData(shop), nil
+	}
 
-	return models.OKData(shop), nil
+	if !isExpired(redisData.ExpireTime) {
+		return models.OKData(redisData.Data), nil
+	}
+
+	s.rebuildShopCache(id, key)
+	return models.OKData(redisData.Data), nil
+}
+
+func (s *ShopService) Save(ctx context.Context, shop *models.Shop) (models.Result, error) {
+	id, err := s.repo.Save(ctx, shop)
+	if err != nil {
+		return models.Fail("系统异常"), err
+	}
+	shop.ID = id
+	return models.OKData(id), nil
 }
 
 func (s *ShopService) Update(ctx context.Context, shop *models.Shop) (models.Result, error) {
@@ -143,36 +155,44 @@ func (s *ShopService) QueryShopByType(ctx context.Context, typeID, current int, 
 	}
 
 	// ── 有坐标：GEO 距离排序 ──────────────────────────────────────
-	// Redis GEOSEARCH 不直接支持 offset，需取 [0, end) 再手动截取
-	// 对应 Java: opsForGeo().search(...).limit(end)
+	// 用 GeoRadius（Redis 3.2+ 支持），兼容 Redis 5.x
+	// GEOSEARCH 是 Redis 6.2 才引入的，这里不能用
+	// GeoRadius 同样不支持 offset，取 [0, end) 后手动截取
 	end := current * maxPageSize
 	key := ShopGeoKey + strconv.Itoa(typeID)
 
-	results, err := s.rdb.GeoSearchLocation(ctx, key, &redis.GeoSearchLocationQuery{
-		GeoSearchQuery: redis.GeoSearchQuery{
-			Longitude:  *x,
-			Latitude:   *y,
-			Radius:     geoRadius,
-			RadiusUnit: "m",
-			Sort:       "ASC",
-			Count:      end, // 取到当前页末尾，再手动 skip from
-		},
+	exists, err := s.rdb.Exists(ctx, key).Result()
+	if err != nil {
+		return models.Fail("系统异常"), err
+	}
+	if exists == 0 {
+		shops, err := s.repo.FindByTypeID(ctx, typeID, offset, maxPageSize)
+		if err != nil {
+			return models.Fail("系统异常"), err
+		}
+		return models.OKData(shops), nil
+	}
+
+	results, err := s.rdb.GeoRadius(ctx, key, *x, *y, &redis.GeoRadiusQuery{
+		Radius:   geoRadius,
+		Unit:     "m",
 		WithDist: true,
+		Sort:     "ASC",
+		Count:    end,
 	}).Result()
 	if err != nil {
-		return models.Fail("系统异常"), fmt.Errorf("GeoSearchLocation: %w", err)
+		return models.Fail("系统异常"), fmt.Errorf("GeoRadius: %w", err)
 	}
 	if len(results) == 0 {
 		return models.OKData([]*models.Shop{}), nil
 	}
 
-	// 没有下一页
-	if int64(len(results)) <= int64(offset) {
+	// 没有下一页（修复：offset >= 实际结果数才是真正没数据）
+	if offset >= len(results) {
 		return models.OKData([]*models.Shop{}), nil
 	}
 
 	// 截取当前页，收集 id 和距离
-	// 对应 Java: content.stream().skip(from).forEach(...)
 	page := results[offset:]
 	ids := make([]int64, 0, len(page))
 	distMap := make(map[int64]float64, len(page))
@@ -209,4 +229,69 @@ func (s *ShopService) QueryShopByName(ctx context.Context, name string, current 
 		return models.Fail("系统异常"), err
 	}
 	return models.OKData(shops), nil
+}
+
+func (s *ShopService) queryShopFromDB(ctx context.Context, key string, id int64) (models.Result, error) {
+	shop, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return models.Fail("系统异常"), err
+	}
+	if shop == nil {
+		s.rdb.Set(ctx, key, "", CacheNullTTL)
+		return models.Fail("商铺不存在"), nil
+	}
+
+	if err := s.setShopCache(ctx, key, shop); err != nil {
+		return models.Fail("系统异常"), err
+	}
+	return models.OKData(shop), nil
+}
+
+func (s *ShopService) setShopCache(ctx context.Context, key string, shop *models.Shop) error {
+	data := models.RedisData{
+		ExpireTime: time.Now().Add(CacheShopLogicalTTL).Format(time.RFC3339Nano),
+		Data:       *shop,
+	}
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return s.rdb.Set(ctx, key, bytes, 0).Err()
+}
+
+func (s *ShopService) rebuildShopCache(id int64, key string) {
+	lockKey := LockShopKey + strconv.FormatInt(id, 10)
+	if !s.tryLock(context.Background(), lockKey) {
+		return
+	}
+
+	go func() {
+		defer s.unlock(context.Background(), lockKey)
+
+		shop, err := s.repo.FindByID(context.Background(), id)
+		if err != nil || shop == nil {
+			return
+		}
+		_ = s.setShopCache(context.Background(), key, shop)
+	}()
+}
+
+func (s *ShopService) tryLock(ctx context.Context, key string) bool {
+	ok, err := s.rdb.SetNX(ctx, key, "1", LockShopTTL).Result()
+	return err == nil && ok
+}
+
+func (s *ShopService) unlock(ctx context.Context, key string) {
+	s.rdb.Del(ctx, key)
+}
+
+func isExpired(expireAt string) bool {
+	if expireAt == "" {
+		return true
+	}
+	expireTime, err := time.Parse(time.RFC3339Nano, expireAt)
+	if err != nil {
+		return true
+	}
+	return expireTime.Before(time.Now())
 }
