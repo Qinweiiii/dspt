@@ -38,6 +38,7 @@ type VoucherService struct {
 	rdb      *redis.Client
 	idWorker *utils.IDWorker
 	locker   utils.Locker
+	bf       *utils.SeckillBloomFilter
 }
 
 func NewVoucherService(
@@ -45,12 +46,14 @@ func NewVoucherService(
 	rdb *redis.Client,
 	idWorker *utils.IDWorker,
 	locker utils.Locker,
+	bf *utils.SeckillBloomFilter,
 ) *VoucherService {
 	return &VoucherService{
 		repo:     repo,
 		rdb:      rdb,
 		idWorker: idWorker,
 		locker:   locker,
+		bf:       bf,
 	}
 }
 
@@ -81,12 +84,14 @@ func (s *VoucherService) AddSeckillVoucher(ctx context.Context, v *models.Vouche
 	}
 	v.ID = id
 
-	if err := s.repo.SaveSeckillVoucher(ctx, &models.SeckillVoucher{
+	sv := &models.SeckillVoucher{
 		VoucherID: id,
 		Stock:     v.Stock,
 		BeginTime: v.BeginTime,
 		EndTime:   v.EndTime,
-	}); err != nil {
+	}
+
+	if err := s.repo.SaveSeckillVoucher(ctx, sv); err != nil {
 		return models.Fail("系统异常"), err
 	}
 
@@ -95,14 +100,32 @@ func (s *VoucherService) AddSeckillVoucher(ctx context.Context, v *models.Vouche
 		return models.Fail("系统异常"), fmt.Errorf("set seckill stock: %w", err)
 	}
 
+	utils.DefaultSeckillCache.SetWindow(id, v.BeginTime, v.EndTime)
+
 	return models.OKData(id), nil
 }
 
 // SeckillVoucher 秒杀下单（主入口，纯 Redis 原子判断，异步写 DB）
 //
-// 返回 orderId 给前端；DB 写入由 mq.VoucherOrderConsumer 异步完成。
-// 若 Lua 返回非 0，直接返回对应哨兵错误，handler 层按需处理。
+// 请求处理顺序（从快到慢）：
+//  1. 本地缓存：售罄标记     → 直接返回，0 网络开销
+//  2. 本地缓存：时间窗口检查  → 直接返回，0 网络开销
+//  3. Redis Lua 原子操作     → 一次网络 RTT
+//  4. Redis Stream 写消息    → 包含在 Lua 里，无额外开销
+//  5. MySQL 异步写（消费者）  → 异步，不阻塞响应
 func (s *VoucherService) SeckillVoucher(ctx context.Context, voucherID, loginUserID int64) (models.Result, error) {
+	// 第一层拦截：本地售罄缓存（最快，不走任何网络）
+	if utils.DefaultSeckillCache.IsSoldOut(voucherID) {
+		return models.Fail(ErrStockInsufficient.Error()), nil
+	}
+
+	// 第二层拦截：本地时间窗口缓存
+	// found=false 说明本地没缓存（启动时已有的老券），降级让 Lua 去处理
+	if inWindow, found := utils.DefaultSeckillCache.IsInWindow(voucherID); found && !inWindow {
+		return models.Fail("活动未开始或已结束"), nil
+	}
+
+	// 第三层拦截：Redis Lua 院子判断（库存 + 一人一单 + 写 Stream）
 	orderID, err := s.idWorker.NextID(ctx, "order")
 	if err != nil {
 		return models.Fail("系统异常"), err
@@ -120,6 +143,8 @@ func (s *VoucherService) SeckillVoucher(ctx context.Context, voucherID, loginUse
 
 	switch res {
 	case 1:
+		// Lua 返回库存不足时，写入本地售罄缓存，后续请求直接在本地拦截
+		utils.DefaultSeckillCache.MarkSoldOut(voucherID)
 		return models.Fail(ErrStockInsufficient.Error()), nil
 	case 2:
 		return models.Fail(ErrDuplicateOrder.Error()), nil

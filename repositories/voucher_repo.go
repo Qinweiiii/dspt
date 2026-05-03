@@ -13,6 +13,12 @@ type VoucherRepository struct {
 	db *sql.DB
 }
 
+type SeckillStockInfo struct {
+	Stock     int
+	BeginTime time.Time
+	EndTime   time.Time
+}
+
 func NewVoucherRepository(db *sql.DB) *VoucherRepository {
 	return &VoucherRepository{db: db}
 }
@@ -91,22 +97,25 @@ func (r *VoucherRepository) SaveSeckillVoucher(ctx context.Context, sv *models.S
 	return nil
 }
 
-// FindSeckillStocks 查询所有秒杀券库存
-func (r *VoucherRepository) FindSeckillStocks(ctx context.Context) (map[int64]int, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT voucher_id, stock FROM tb_seckill_voucher WHERE stock > 0`)
+// FindSeckillStocks 查询所有秒杀券库存+时间窗口（启动预热用）
+func (r *VoucherRepository) FindSeckillStockInfos(ctx context.Context) (map[int64]SeckillStockInfo, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT voucher_id, stock, begin_time, end_time
+		 FROM tb_seckill_voucher WHERE stock > 0`,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("FindSeckillStocks: %w", err)
+		return nil, fmt.Errorf("FindSeckillStockInfos: %w", err)
 	}
 	defer rows.Close()
 
-	result := make(map[int64]int)
+	result := make(map[int64]SeckillStockInfo)
 	for rows.Next() {
 		var voucherID int64
-		var stock int
-		if err := rows.Scan(&voucherID, &stock); err != nil {
-			return nil, fmt.Errorf("FindSeckillStocks scan: %w", err)
+		var info SeckillStockInfo
+		if err := rows.Scan(&voucherID, &info.Stock, &info.BeginTime, &info.EndTime); err != nil {
+			return nil, fmt.Errorf("FindSeckillStockInfos scan: %w", err)
 		}
-		result[voucherID] = stock
+		result[voucherID] = info
 	}
 	return result, rows.Err()
 }

@@ -24,6 +24,21 @@ type OrderCreator interface {
 	CreateVoucherOrder(ctx context.Context, order *models.VoucherOrder) error
 }
 
+// DeadLetterOrder 死信记录
+type DeadLetterOrder struct {
+	MsgID      string
+	OrderID    int64
+	UserID     int64
+	VoucherID  int64
+	RetryCount int
+	LastError  string
+}
+
+// DeadLetterWriter 死信写入接口，解耦 mq 包与 DB 操作
+type DeadLetterWriter interface {
+	SaveDeadLetter(ctx context.Context, dl *DeadLetterOrder) error
+}
+
 // ========================================
 // VoucherOrderConsumer
 // ========================================
@@ -34,16 +49,21 @@ const (
 	consumerName = "c1"
 	blockTimeout = 2 * time.Second
 	retryDelay   = 20 * time.Millisecond
+
+	// maxRetry 超过这个次数就放弃重试，写入死信表
+	// 设 3 次：网络抖动通常 1~2 次就恢复，3 次还失败说明是真的有问题
+	maxRetry = 3
 )
 
 type VoucherOrderConsumer struct {
-	rdb     *redis.Client
-	creator OrderCreator
-	locker  utils.Locker
+	rdb        *redis.Client
+	creator    OrderCreator
+	locker     utils.Locker
+	deadWriter DeadLetterWriter // ★ 新增：死信写入器
 }
 
-func NewVoucherOrderConsumer(rdb *redis.Client, creator OrderCreator, locker utils.Locker) *VoucherOrderConsumer {
-	return &VoucherOrderConsumer{rdb: rdb, creator: creator, locker: locker}
+func NewVoucherOrderConsumer(rdb *redis.Client, creator OrderCreator, locker utils.Locker, deadWriter DeadLetterWriter) *VoucherOrderConsumer {
+	return &VoucherOrderConsumer{rdb: rdb, creator: creator, locker: locker, deadWriter: deadWriter}
 }
 
 // Start 启动消费者，ctx 取消时优雅退出
@@ -92,7 +112,7 @@ func (c *VoucherOrderConsumer) consume(ctx context.Context) error {
 
 	for _, stream := range msgs {
 		for _, msg := range stream.Messages {
-			if err := c.handle(ctx, msg); err != nil {
+			if err := c.handleWithRetry(ctx, msg); err != nil {
 				return err // 触发 pending list 补偿
 			}
 		}
@@ -131,7 +151,79 @@ func (c *VoucherOrderConsumer) drainPendingList(ctx context.Context) {
 	}
 }
 
-// handle 处理单条消息：加分布式锁 → 写 DB → ACK
+// ★ handleWithRetry：在原来 handle 基础上加重试计数和死信降级
+//
+// 核心改动逻辑：
+//  1. 先查这条消息已经被 pending 了多少次（XPENDING 返回的 delivery-count）
+//  2. 超过 maxRetry → 写死信表 + ACK（不再阻塞队列）
+//  3. 未超过 → 正常处理，失败则留在 pending list 等下次补偿
+func (c *VoucherOrderConsumer) handleWithRetry(ctx context.Context, msg redis.XMessage) error {
+	// 查这条消息的投递次数
+	deliveryCount, err := c.getDeliveryCount(ctx, msg.ID)
+	if err != nil {
+		log.Printf("[Consumer] 查询投递次数失败 id=%s: %v，按正常处理", msg.ID, err)
+		// 查询失败不影响正常流程，降级为正常处理
+		return c.handle(ctx, msg)
+	}
+
+	// 超过最大重试次数 → 写死信
+	if deliveryCount > maxRetry {
+		log.Printf("[Consumer] 消息 id=%s 已投递 %d 次，超过上限，写入死信表", msg.ID, deliveryCount)
+		c.moveToDeadLetter(ctx, msg, deliveryCount, "超过最大重试次数")
+		// ACK 掉，不再阻塞后续消息
+		c.ack(ctx, msg.ID)
+		return nil
+	}
+
+	return c.handle(ctx, msg)
+}
+
+// getDeliveryCount 通过 XPENDING 查询某条消息的投递次数
+func (c *VoucherOrderConsumer) getDeliveryCount(ctx context.Context, msgID string) (int64, error) {
+	// XPENDING stream group - + 10 consumer
+	// 只取这一条消息的信息
+	pending, err := c.rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: streamName,
+		Group:  groupName,
+		Start:  msgID,
+		Stop:   msgID,
+		Count:  1,
+	}).Result()
+	if err != nil {
+		return 0, err
+	}
+	if len(pending) == 0 {
+		return 0, nil
+	}
+	return pending[0].RetryCount, nil
+}
+
+// moveToDeadLetter 把失败消息写入死信表
+func (c *VoucherOrderConsumer) moveToDeadLetter(ctx context.Context, msg redis.XMessage, retryCount int64, reason string) {
+	order, err := parseOrder(msg.Values)
+	if err != nil {
+		log.Printf("[DeadLetter] 解析消息失败 id=%s，无法写死信: %v", msg.ID, err)
+		return
+	}
+
+	dl := &DeadLetterOrder{
+		MsgID:      msg.ID,
+		OrderID:    order.ID,
+		UserID:     order.UserID,
+		VoucherID:  order.VoucherID,
+		RetryCount: int(retryCount),
+		LastError:  reason,
+	}
+
+	if err := c.deadWriter.SaveDeadLetter(ctx, dl); err != nil {
+		// 死信写入失败只打日志，不影响主流程（消息还是会被 ACK 掉）
+		log.Printf("[DeadLetter] 写入死信表失败 id=%s: %v", msg.ID, err)
+		return
+	}
+	log.Printf("[DeadLetter] 消息 id=%s 已写入死信表，人工处理", msg.ID)
+}
+
+// handle 处理单条消息（逻辑不变）
 func (c *VoucherOrderConsumer) handle(ctx context.Context, msg redis.XMessage) error {
 	order, err := parseOrder(msg.Values)
 	if err != nil {

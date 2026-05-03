@@ -95,10 +95,12 @@ func main() {
 	// 共享基础设施
 	idWorker := utils.NewIDWorker(rdb)
 	locker := utils.NewRedisLocker(rdb)
+	deadLetterRepo := repositories.NewDeadLetterRepository(db)
+	bf := utils.NewSeckillBloomFilter(rdb)
 
 	// 秒杀模块
 	voucherRepo := repositories.NewVoucherRepository(db)
-	voucherSvc := services.NewVoucherService(voucherRepo, rdb, idWorker, locker)
+	voucherSvc := services.NewVoucherService(voucherRepo, rdb, idWorker, locker, bf)
 	voucherHandler := handlers.NewVoucherHandler(voucherSvc)
 	voucherOrderHandler := handlers.NewVoucherOrderHandler(voucherSvc)
 
@@ -121,7 +123,7 @@ func main() {
 		blogHandler, followHandler, voucherHandler, voucherOrderHandler, uploadHandler)
 
 	// 6. 启动秒杀订单异步消费者（Phase 5 实现后取消注释）
-	consumer := mq.NewVoucherOrderConsumer(rdb, voucherSvc, locker)
+	consumer := mq.NewVoucherOrderConsumer(rdb, voucherSvc, locker, deadLetterRepo)
 	go consumer.Start(ctx) // ctx 取消时消费者自动退出
 
 	// 7. 启动 HTTP 服务器（支持优雅关机）
