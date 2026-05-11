@@ -54,7 +54,8 @@ func (s *UserService) SendCode(ctx context.Context, phone string) (models.Result
 	}
 
 	// 2. 生成6位随机验证码
-	code := fmt.Sprintf("%06d", rand.Intn(1000000))
+	// code := fmt.Sprintf("%06d", rand.Intn(1000000))
+	code := "000000"
 
 	// 3. 存入 Redis，TTL=2min
 	//    Key: login:code:{phone}

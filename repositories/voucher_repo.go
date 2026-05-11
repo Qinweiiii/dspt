@@ -13,12 +13,6 @@ type VoucherRepository struct {
 	db *sql.DB
 }
 
-type SeckillStockInfo struct {
-	Stock     int
-	BeginTime time.Time
-	EndTime   time.Time
-}
-
 func NewVoucherRepository(db *sql.DB) *VoucherRepository {
 	return &VoucherRepository{db: db}
 }
@@ -98,7 +92,7 @@ func (r *VoucherRepository) SaveSeckillVoucher(ctx context.Context, sv *models.S
 }
 
 // FindSeckillStocks 查询所有秒杀券库存+时间窗口（启动预热用）
-func (r *VoucherRepository) FindSeckillStockInfos(ctx context.Context) (map[int64]SeckillStockInfo, error) {
+func (r *VoucherRepository) FindSeckillStockInfos(ctx context.Context) (map[int64]models.SeckillStockInfo, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT voucher_id, stock, begin_time, end_time
 		 FROM tb_seckill_voucher WHERE stock > 0`,
@@ -108,10 +102,10 @@ func (r *VoucherRepository) FindSeckillStockInfos(ctx context.Context) (map[int6
 	}
 	defer rows.Close()
 
-	result := make(map[int64]SeckillStockInfo)
+	result := make(map[int64]models.SeckillStockInfo)
 	for rows.Next() {
 		var voucherID int64
-		var info SeckillStockInfo
+		var info models.SeckillStockInfo
 		if err := rows.Scan(&voucherID, &info.Stock, &info.BeginTime, &info.EndTime); err != nil {
 			return nil, fmt.Errorf("FindSeckillStockInfos scan: %w", err)
 		}

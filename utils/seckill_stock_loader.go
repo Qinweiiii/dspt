@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/qinweiiii/dspt/models"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -28,7 +29,7 @@ func NewSeckillStockLoader(rdb *redis.Client) *SeckillStockLoader {
 
 // StockInfoProvider 供 Loader 查询库存+时间窗口
 type StockInfoProvider interface {
-	FindSeckillStockInfos(ctx context.Context) (map[int64]SeckillStockInfo, error)
+	FindSeckillStockInfos(ctx context.Context) (map[int64]models.SeckillStockInfo, error)
 }
 
 // SeckillStockInfo 从 repo 层拿到的结构（在 repo 包定义，这里引用）

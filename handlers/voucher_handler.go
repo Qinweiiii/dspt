@@ -27,6 +27,7 @@ func (h *VoucherHandler) RegisterRoutes(r *gin.Engine, auth gin.HandlerFunc) {
 
 	g := r.Group("/voucher")
 	g.Use(auth)
+	g.Use(SeckillRateLimitMiddleware())
 	g.POST("", h.AddVoucher)
 	g.POST("/seckill", h.AddSeckill)
 }

@@ -186,7 +186,7 @@ func (c *VoucherOrderConsumer) getDeliveryCount(ctx context.Context, msgID strin
 		Stream: streamName,
 		Group:  groupName,
 		Start:  msgID,
-		Stop:   msgID,
+		End:    msgID,
 		Count:  1,
 	}).Result()
 	if err != nil {
