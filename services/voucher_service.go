@@ -34,11 +34,29 @@ var (
 // ========================================
 
 type VoucherService struct {
-	repo     *repositories.VoucherRepository
-	rdb      *redis.Client
-	idWorker *utils.IDWorker
-	locker   utils.Locker
-	bf       *utils.SeckillBloomFilter
+	repo        voucherRepository
+	rdb         *redis.Client
+	idWorker    idGenerator
+	locker      utils.Locker
+	eligibility seckillEligibility
+}
+
+type voucherRepository interface {
+	FindByShopID(ctx context.Context, shopID int64) ([]models.Voucher, error)
+	SaveVoucher(ctx context.Context, v *models.Voucher) (int64, error)
+	SaveSeckillVoucher(ctx context.Context, sv *models.SeckillVoucher) error
+	WithTx(ctx context.Context, fn repositories.CreateOrderFn) error
+	CountOrder(ctx context.Context, tx *sql.Tx, userID, voucherID int64) (int64, error)
+	DecrStock(ctx context.Context, tx *sql.Tx, voucherID int64) (int64, error)
+	SaveOrder(ctx context.Context, tx *sql.Tx, order *models.VoucherOrder) error
+}
+
+type idGenerator interface {
+	NextID(ctx context.Context, keyPrefix string) (int64, error)
+}
+
+type seckillEligibility interface {
+	IsAllowed(ctx context.Context, voucherID, userID int64) (allowed bool, exists bool)
 }
 
 func NewVoucherService(
@@ -48,12 +66,22 @@ func NewVoucherService(
 	locker utils.Locker,
 	bf *utils.SeckillBloomFilter,
 ) *VoucherService {
+	return NewVoucherServiceWithDeps(repo, rdb, idWorker, locker, bf)
+}
+
+func NewVoucherServiceWithDeps(
+	repo voucherRepository,
+	rdb *redis.Client,
+	idWorker idGenerator,
+	locker utils.Locker,
+	eligibility seckillEligibility,
+) *VoucherService {
 	return &VoucherService{
-		repo:     repo,
-		rdb:      rdb,
-		idWorker: idWorker,
-		locker:   locker,
-		bf:       bf,
+		repo:        repo,
+		rdb:         rdb,
+		idWorker:    idWorker,
+		locker:      locker,
+		eligibility: eligibility,
 	}
 }
 
@@ -110,9 +138,10 @@ func (s *VoucherService) AddSeckillVoucher(ctx context.Context, v *models.Vouche
 // 请求处理顺序（从快到慢）：
 //  1. 本地缓存：售罄标记     → 直接返回，0 网络开销
 //  2. 本地缓存：时间窗口检查  → 直接返回，0 网络开销
-//  3. Redis Lua 原子操作     → 一次网络 RTT
-//  4. Redis Stream 写消息    → 包含在 Lua 里，无额外开销
-//  5. MySQL 异步写（消费者）  → 异步，不阻塞响应
+//  3. Redis Bloom/白名单资格过滤 → 未配置过滤器则全员放行
+//  4. Redis Lua 原子操作       → 一次网络 RTT
+//  5. Redis Stream 写消息      → 包含在 Lua 里，无额外开销
+//  6. MySQL 异步写（消费者）    → 异步，不阻塞响应
 func (s *VoucherService) SeckillVoucher(ctx context.Context, voucherID, loginUserID int64) (models.Result, error) {
 	// 第一层拦截：本地售罄缓存（最快，不走任何网络）
 	if utils.DefaultSeckillCache.IsSoldOut(voucherID) {
@@ -125,7 +154,14 @@ func (s *VoucherService) SeckillVoucher(ctx context.Context, voucherID, loginUse
 		return models.Fail("活动未开始或已结束"), nil
 	}
 
-	// 第三层拦截：Redis Lua 院子判断（库存 + 一人一单 + 写 Stream）
+	if s.eligibility != nil {
+		allowed, exists := s.eligibility.IsAllowed(ctx, voucherID, loginUserID)
+		if exists && !allowed {
+			return models.Fail("无抢购资格"), nil
+		}
+	}
+
+	// 第三层拦截：Redis Lua 原子判断（库存 + 一人一单 + 写 Stream）
 	orderID, err := s.idWorker.NextID(ctx, "order")
 	if err != nil {
 		return models.Fail("系统异常"), err

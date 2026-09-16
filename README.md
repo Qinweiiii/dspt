@@ -12,7 +12,9 @@
 - [核心功能](#核心功能)
 - [关键设计决策](#关键设计决策)
 - [快速启动](#快速启动)
+- [测试](#测试)
 - [压测结果](#压测结果)
+- [水平扩容](#水平扩容)
 - [目录结构](#目录结构)
 
 ---
@@ -25,7 +27,7 @@
 - 每场活动可以售卖普通票（**Voucher**）和限时特价秒杀票（**SeckillVoucher**）
 - 用户可以发布活动**图文帖（Blog）**、关注其他用户、浏览**Feed 流**
 
-系统核心挑战在于**限量秒杀场景下的高并发处理**，采用四层漏斗拦截架构，将 90%+ 的无效请求拦在 Redis Lua 之前。
+系统核心挑战在于**限量秒杀场景下的高并发处理**，采用多层漏斗拦截架构，将无效请求尽可能拦在 Redis Lua 和 MySQL 之前。
 
 ---
 
@@ -35,13 +37,13 @@
 |---|---|---|
 | Web 框架 | Go 1.21 + Gin | 路由、中间件、参数绑定 |
 | 数据库 | MySQL 8.0 | 主存储，乐观锁扣减库存 |
-| 缓存 | Redis 7 | String / ZSet / GEO / BitMap / BF |
+| 缓存 | Redis 7 / Redis Stack | String / ZSet / GEO / BitMap / BF |
 | 消息队列 | Redis Stream | 秒杀订单异步落库 |
 | 分布式锁 | Redis SETNX + Lua | 原子释放，UUID 防误删 |
 | 全局 ID | 时间戳 + Redis 自增 | 雪花变体，按天分 key |
 | 限流 | golang.org/x/time/rate | 令牌桶，按 voucherID 独立桶 |
 | 本地缓存 | sync.Map | 售罄标记 + 时间窗口，进程内拦截 |
-| 布隆过滤器 | Redis Stack BF 模块 | 过滤无资格用户 |
+| 布隆过滤器 | Redis Stack BF 模块 | 可选资格过滤；未配置过滤器时全员放行 |
 
 > **为什么选 Redis Stream 而不是 Kafka？**
 > Redis Stream 在此场景下满足全部需求：顺序消费、消费者组、pending list 补偿均已覆盖。Kafka 的核心优势是持久化的超大规模吞吐（百万 QPS）和多消费者组日志回放，在单体服务量级引入是过度设计。若后续多个下游系统需要同时消费同一条订单消息，再迁移 Kafka。
@@ -89,14 +91,13 @@
 
 ### 秒杀抢票链路
 
-**四层漏斗拦截**，把无效请求尽可能拦在代价最低的层次：
+**多层漏斗拦截**，把无效请求尽可能拦在代价最低的层次：
 
 ```
 请求进入
     │
-    ▼ 层 0：布隆过滤器（Redis BF.EXISTS）
-    │  过滤无购票资格用户（黑名单 / 非会员专属票）
-    │  → 无资格：0 DB / 0 Redis 写操作，直接返回
+    ▼ 层 0：令牌桶限流（按 voucherID 独立桶）
+    │  拦截瞬时洪峰，保护 Redis Lua
     │
     ▼ 层 1：本地售罄缓存（进程内 sync.Map）
     │  Lua 首次返回库存不足时写入，后续请求进程内拦截
@@ -106,11 +107,14 @@
     │  启动时预热每张券的 begin_time / end_time
     │  → 不在活动期：0 网络开销，直接返回
     │
-    ▼ 层 3：Redis Lua 原子脚本（1 次网络 RTT）
+    ▼ 层 3：资格过滤（Redis Bloom / whitelist，可选）
+    │  过滤无购票资格用户；未初始化过滤器时全员放行
+    │
+    ▼ 层 4：Redis Lua 原子脚本（1 次网络 RTT）
     │  原子执行：检查库存 → 一人一单 → 写 Stream
     │  → 超卖 / 重复下单：对应错误码返回
     │
-    ▼ 层 4：Redis Stream 异步落库
+    ▼ 层 5：Redis Stream 异步落库
        消费者重试计数（XPENDING delivery-count）
        超过 maxRetry=3 → 写死信表，ACK 不阻塞队列
        → MySQL 写订单，乐观锁扣减库存
@@ -234,41 +238,84 @@ BITFIELD sign:{yyyy:MM:}{userId} GET u{dayOfMonth} 0
 
 **依赖环境：**
 - Go 1.21+
-- MySQL 8.0
-- Redis Stack（含 BF 模块）
+- Podman 或 Docker
+- MySQL 客户端（用于导入 `qppt_v2.0.sql`）
+- Redis CLI（可选，用于查看库存和 Stream）
+
+下面以本机路径 `/Users/eddiel/Documents/dspt`、Podman、MySQL 端口 `3308` 为例。
+
+**0. 进入项目目录**
 
 ```bash
-# 启动 Redis Stack（推荐 Docker）
-docker run -d -p 6379:6379 redis/redis-stack-server
+cd /Users/eddiel/Documents/dspt
 ```
 
-**1. 初始化数据库**
+**1. 启动依赖**
 
 ```bash
-mysql -u root -p < qppt_v2_0.sql
+# Podman 启动 MySQL
+podman run -d --name dspt-mysql \
+  -e MYSQL_ROOT_PASSWORD=123456 \
+  -e MYSQL_DATABASE=qppt \
+  -p 127.0.0.1:3308:3306 \
+  -v dspt-mysql-data:/var/lib/mysql \
+  docker.io/library/mysql:8.0
+
+# Redis：普通 Redis 可跑主流程；需要 BF 时换 Redis Stack
+# 注意：官方 redis 镜像容器内监听的是 6379，宿主用 6378 时必须写成 6378:6379
+# （写成 6378:6378 会连到容器内的空端口，报 Connection reset by peer）
+podman run -d --name dspt-redis -p 127.0.0.1:6378:6379 redis:7
 ```
 
-**2. 配置文件**
+如果容器已经存在：
+
+```bash
+podman start dspt-mysql
+podman start dspt-redis
+```
+
+确认端口：
+
+```bash
+podman ps
+mysqladmin -h127.0.0.1 -P3308 -uroot -p123456 ping
+redis-cli -h 127.0.0.1 -p 6378 ping
+```
+
+**2. 初始化数据库**
+
+```bash
+mysql -h127.0.0.1 -P3308 -uroot -p123456 qppt < qppt_v2.0.sql
+```
+
+如果你想重新导入一遍初始化数据，可以直接重复执行上面命令；SQL 里包含 `DROP TABLE IF EXISTS`，会重建表。
+
+**3. 检查配置文件**
 
 ```yaml
 # config.yaml
 server:
-  port: 8080
+  port: 8081
 mysql:
-  dsn: "root:password@tcp(127.0.0.1:3306)/qppt?parseTime=true&loc=Local"
+  dsn: "root:123456@tcp(127.0.0.1:3308)/qppt?charset=utf8mb4&parseTime=True&loc=Local"
 redis:
-  addr: "127.0.0.1:6379"
+  addr: "127.0.0.1:6378"
   password: ""
   db: 0
 upload:
   dir: "resources/uploads"
 ```
 
-**3. 启动**
+**4. 启动后端**
 
 ```bash
-go mod tidy
 go run main/main.go
+```
+
+后端地址：
+
+```text
+http://127.0.0.1:8081
 ```
 
 正常启动日志：
@@ -281,22 +328,46 @@ go run main/main.go
 [SeckillStockLoader] Redis key=seckill:stock:6 写入 stock=200
 [SeckillStockLoader] 本地缓存 voucherID=6 window=[2026-06-10 12:00, 2026-06-30 15:59]
 ✅ VoucherOrderConsumer 启动，监听 stream.orders
-🚀 服务启动，端口: 8080
+🚀 服务启动，端口: 8081
 ```
 
-**4. 验证秒杀链路**
+**5. 启动前端静态页**
+
+项目自带的是静态 HTML/Vue2 页面。另开一个终端：
+
+```bash
+cd /Users/eddiel/Documents/dspt
+go run tools/front_proxy.go
+```
+
+前端地址：
+
+```text
+http://127.0.0.1:8090
+```
+
+`tools/front_proxy.go` 会把静态文件挂到 `8090`，并把 `/api/*` 反代到后端 `8081`。如果你使用 nginx，也可以参考 `resources/nginx-1.18.0/conf/nginx.conf`。
+
+**6. 验证接口**
+
+```bash
+curl http://127.0.0.1:8081/ping
+curl http://127.0.0.1:8090/api/shop-type/list
+```
+
+**7. 验证秒杀链路**
 
 ```bash
 # 发验证码
-curl -X POST "http://localhost:8080/user/code?phone=13686869696"
+curl -X POST "http://localhost:8081/user/code?phone=13686869696"
 
 # 登录
-curl -X POST http://localhost:8080/user/login \
+curl -X POST http://localhost:8081/user/login \
   -H "Content-Type: application/json" \
-  -d '{"phone":"13686869696","code":"YOUR_CODE"}'
+  -d '{"phone":"13686869696","code":"000000"}'
 
 # 抢票（voucherId=6，库存 200）
-curl -X POST http://localhost:8080/voucher-order/seckill/6 \
+curl -X POST http://localhost:8081/voucher-order/seckill/6 \
   -H "authorization: YOUR_TOKEN"
 
 # 验证 Redis 库存扣减
@@ -306,19 +377,55 @@ redis-cli GET seckill:stock:6
 redis-cli XPENDING stream.orders g1 - + 10
 ```
 
+**常用命令**
+
+```bash
+# 后端单测
+go test ./...
+
+# Redis Lua integration 测试，默认使用 Redis DB 15
+go test -tags=integration ./services -run TestSeckillLuaIntegration -count=1
+
+# 查看 MySQL 容器日志
+podman logs dspt-mysql
+
+# 停止服务依赖
+podman stop dspt-mysql dspt-redis
+```
+
+---
+
+## 测试
+
+默认测试不依赖真实 MySQL/Redis，适合 CI 和面试现场快速验证：
+
+```bash
+go test ./...
+```
+
+已覆盖：
+
+- `services/voucher_service_test.go`：正常秒杀、库存不足、重复下单、资格过滤、ID 生成失败。
+- `mq/voucher_order_consumer_test.go`：Stream 消息解析、异常消息拒绝、死信阈值判断。
+- `services/seckill_lua_integration_test.go`：真实 Redis Lua 脚本测试，使用 build tag 隔离。
+
+真实 Redis Lua 测试：
+
+```bash
+# 默认使用 Redis DB 15，避免污染业务 DB 0
+go test -tags=integration ./services -run TestSeckillLuaIntegration -count=1
+```
+
 ---
 
 ## 压测结果
 
-```bash
-# 使用 hey 并发压测
-hey -n 1000 -c 200 \
-  -m POST \
-  -H "authorization: TOKEN" \
-  http://localhost:8080/voucher-order/seckill/8
-```
+压测步骤、数据准备、k6 脚本和结果记录模板见 [docs/benchmark.md](docs/benchmark.md)。
 
-> 📌 压测数据待补充（建议用真实数据替换）
+本项目建议区分两类压测：
+
+- 性能压测：QPS、平均延迟、P95/P99、错误率。
+- 正确性压测：不超卖、不重复下单、Stream pending 可恢复、死信不阻塞。
 
 **验证超卖防护：**
 
@@ -331,6 +438,20 @@ SELECT user_id, COUNT(*) cnt
 FROM tb_voucher_order WHERE voucher_id = 8
 GROUP BY user_id HAVING cnt > 1;
 ```
+
+---
+
+## 水平扩容
+
+水平扩容设计说明见 [docs/scaling.md](docs/scaling.md)。
+
+核心面试讲法：
+
+- Go 应用层无状态，可多实例挂负载均衡。
+- Redis 负责登录态、库存、一人一单、限流、Stream 削峰。
+- MySQL 做最终一致性兜底，乐观锁防止 DB 层超卖。
+- 热点券可做资源隔离、库存分片、Redis Cluster、异步削峰和 DB 分库分表。
+- 本地压测主要验证正确性和单机容量，真实几十万并发需要多压测机和完整监控。
 
 ---
 
@@ -353,7 +474,7 @@ GROUP BY user_id HAVING cnt > 1;
 │   ├── shop_service.go             # 商铺缓存（逻辑过期）+ GEO
 │   ├── blog_service.go             # 图文帖、点赞 ZSet、Feed 流
 │   ├── follow_service.go           # 关注、共同关注（SINTER）
-│   ├── voucher_service.go          # 秒杀核心（四层拦截）
+│   ├── voucher_service.go          # 秒杀核心（多层拦截）
 │   └── seckill.lua                 # 原子 Lua 脚本
 ├── repositories/
 │   ├── user_repo.go
@@ -371,5 +492,5 @@ GROUP BY user_id HAVING cnt > 1;
 │   ├── bloom_filter.go             # 布隆过滤器（Redis BF 模块）
 │   ├── geo_loader.go               # 启动时 GEO 数据预热
 │   └── seckill_stock_loader.go     # 启动时秒杀库存预热（幂等）
-└── qppt_v2_0.sql                   # 完整数据库初始化脚本
+└── qppt_v2.0.sql                   # 完整数据库初始化脚本
 ```

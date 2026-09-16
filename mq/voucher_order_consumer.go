@@ -167,7 +167,7 @@ func (c *VoucherOrderConsumer) handleWithRetry(ctx context.Context, msg redis.XM
 	}
 
 	// 超过最大重试次数 → 写死信
-	if deliveryCount > maxRetry {
+	if shouldMoveToDeadLetter(deliveryCount) {
 		log.Printf("[Consumer] 消息 id=%s 已投递 %d 次，超过上限，写入死信表", msg.ID, deliveryCount)
 		c.moveToDeadLetter(ctx, msg, deliveryCount, "超过最大重试次数")
 		// ACK 掉，不再阻塞后续消息
@@ -176,6 +176,10 @@ func (c *VoucherOrderConsumer) handleWithRetry(ctx context.Context, msg redis.XM
 	}
 
 	return c.handle(ctx, msg)
+}
+
+func shouldMoveToDeadLetter(deliveryCount int64) bool {
+	return deliveryCount > maxRetry
 }
 
 // getDeliveryCount 通过 XPENDING 查询某条消息的投递次数
